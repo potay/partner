@@ -1,0 +1,449 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Partner</title>
+    <link href="https://fonts.googleapis.com/css?family=Roboto+Mono" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css?family=Roboto" rel="stylesheet">
+    <style type="text/css">
+      html, body {
+        height: 100%;
+        margin: 0px;
+        padding: 0px;
+        background-color: #EEEEEE;
+      }
+      #editor, #markup {
+        position: absolute;
+        height: 100%;
+        width: 80%;
+        font-family: 'Roboto Mono', monospace;
+        font-size: 12pt;
+        border: none;
+        outline: none;
+      }
+      #editor {
+        color: transparent;
+        text-shadow: 0px 0px 0px #000;
+        resize: none;
+        overflow: auto;
+      }
+      #markup {
+        pointer-events: none;
+        z-index: 999;
+        overflow: hidden;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        color: rgba(255,255,255,0);
+      }
+      .caret::before {
+        position: absolute;
+        content: "|";
+        font-size: 14pt;
+        line-height: 14pt;
+        font-weight: 900;
+        transform : translate(-3px, 2px);
+        -webkit-transform: translate(-3px, 2px); /* Safari and Chrome */
+        -moz-transform: translate(-3px, 2px); /* Firefox */
+        -ms-transform: translate(-3px, 2px); /* IE 9+ */
+        -o-transform: translate(-3px, 2px); /* Opera */
+      }
+      .caret::after {
+        position: absolute;
+        content: ".";
+        font-size: 24pt;
+        line-height: 14pt;
+        font-weight: 900;
+        transform : translate(-7px, -16px);
+        -webkit-transform: translate(-7px, -16px); /* Safari and Chrome */
+        -moz-transform: translate(-7px, -16px); /* Firefox */
+        -ms-transform: translate(-7px, -16px); /* IE 9+ */
+        -o-transform: translate(-7px, -16px); /* Opera */
+      }
+      #paper {
+        padding: 10px 10px 10px 10px;
+        margin: 0 auto;
+        width: 80%;
+        height: 100%;
+        box-shadow: 0px 10px 30px 0px rgba(0,0,0,0.5);
+        border: none;
+        background-color: white;
+      }
+      #paper-container {
+        width: 100%;
+        height: 100%;
+      }
+      #doc-title {
+        height: 64px;
+        width: 100%;
+        text-align: center;
+        line-height: 64px;
+        font-family: 'Roboto', sans-serif;
+        font-size: 18pt;
+        font-weight: 900;
+        color: white;
+        background-color: #444499;
+        box-shadow: 0px 2px 20px 0px rgba(0,0,0,0.5);
+        margin-bottom: 32px;
+        outline: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="doc-title" contenteditable></div>
+    <div id="paper">
+      <div id="paper-container">
+        <textarea id="editor"></textarea>
+        <div id="markup"></div>
+      </div>
+    </div>
+    <script src="https://cdn.socket.io/socket.io-1.4.5.js"></script>
+    <script src="http://cdnjs.cloudflare.com/ajax/libs/jquery/2.1.4/jquery.js"></script>
+    <script src="https://neil.fraser.name/software/diff_match_patch/svn/trunk/javascript/diff_match_patch.js"></script>
+    <script>
+      ///////////////////////
+      //   General Stuff   //
+      ///////////////////////
+
+      var user = 'user'+Math.round(Math.random()*1000);
+      function getUrlVars() {
+        var vars = {};
+        var parts = window.location.href.replace(/[?&]+([^=&]+)=([^&]*)/gi, function(m,key,value) {
+        vars[key] = value;
+        });
+        return vars;
+      }
+      var docID = "welcome";
+
+
+      ///////////////////////
+      //    Global Vars    //
+      ///////////////////////
+
+      var lastCursorPosition = 0;
+      var clients = {};
+      var shadowCopy = "";
+
+
+      ///////////////////////
+      //     Editor UI     //
+      ///////////////////////
+
+      function setEditorContent(content) {
+        refreshCarets();
+        $('#editor').val(content);
+      }
+
+      function getEditorContent() {
+        return $('#editor').val();;
+      }
+
+      function cursorChanged() {
+        var newPosition = getCursorPosition();
+        if (newPosition !== lastCursorPosition) {
+          lastCursorPosition = newPosition;
+          return true;
+        }
+        return false;
+      }
+
+      function getCursorPosition() {
+        return $("#editor").prop("selectionStart");
+      }
+
+      function setSelectionRange(input, selectionStart, selectionEnd) {
+        if (input.setSelectionRange) {
+          input.focus();
+          input.setSelectionRange(selectionStart, selectionEnd);
+        }
+        else if (input.createTextRange) {
+          var range = input.createTextRange();
+          range.collapse(true);
+          range.moveEnd('character', selectionEnd);
+          range.moveStart('character', selectionStart);
+          range.select();
+        }
+      }
+
+      function setCursorToPos(input, pos) {
+        setSelectionRange(input, pos, pos);
+      }
+
+      function refreshCarets() {
+        var content = "";
+        var lastPos = 0;
+        var clientsData = Object.values(clients);
+        clientsData.sort(function(a, b){return a.CursorPos-b.CursorPos});
+        for (var i = 0; i < clientsData.length; i++) {
+          var pos = clientsData[i].CursorPos;
+          var color = clientsData[i].color;
+          var caretHtml = "<span class='caret' style='color: "+color+"'></span>";
+          var fillerContent = "";
+          for (var j = lastPos; j < shadowCopy.length && j < pos; j++) {
+            if (shadowCopy[j] != "\n") {
+              fillerContent += shadowCopy[j];
+            } else {
+              fillerContent += "<br>";
+            }
+          }
+          content = [content, fillerContent, caretHtml].join('');
+          lastPos = pos;
+        }
+        var fillerContent = "";
+        for (var j = lastPos; j < shadowCopy.length; j++) {
+          if (shadowCopy[j] != "\n") {
+            fillerContent += shadowCopy[j];
+          } else {
+            fillerContent += "<br>";
+          }
+        }
+        content = [content, fillerContent].join('');
+        $("#markup").html(content).width($("#editor").width());
+      }
+
+      $("#editor").scroll(function() {
+        $("#markup").scrollTop($("#editor").scrollTop());
+      });
+
+
+      ///////////////////////
+      //     Socket IO     //
+      ///////////////////////
+
+      setEditorContent("Connecting...");
+      $.getJSON("http://localhost:8090", function(data) {
+        setEditorContent("");
+        var connected = true;
+        var rejected = false;
+        console.log(data);
+        var socket = io('http://'+data.hostport, {
+          reconnectionAttempts: 1
+        });
+
+        socket.on('reconnect_failed', function(e) {
+          clients = {};
+          setEditorContent("Unable to connect to server. Try another one.");
+        });
+
+        socket.on('reconnect_error', function(e) {
+          clients = {};
+          setEditorContent("Unable to connect to server. Try another one.");
+        })
+
+        socket.on('connect', function(n) {
+          var userData = {
+            "Name": user,
+            "DocID": docID,
+            "CursorPos": 0,
+          }
+          socket.emit('user update', JSON.stringify(userData), function(success, err) {
+            if (success) {
+              $("#doc-title").text(docID);
+              connected = true;
+            } else {
+              connected = false;
+              if (!rejected) {
+                setEditorContent(err);
+              }
+            }
+          });
+        });
+
+        socket.on('reconnect', function(n) {
+          var userData = {
+            "Name": user,
+            "DocID": docID,
+            "CursorPos": 0,
+          }
+          socket.emit('user update', JSON.stringify(userData), function(success, err) {
+            if (success) {
+              $("#doc-title").text(docID);
+              connected = true;
+            } else {
+              connected = false;
+              if (!rejected) {
+                setEditorContent(err);
+              }
+            }
+          });
+        });
+
+        socket.on('connect_error', function(e) {
+          connected = false;
+          setEditorContent("Connecting...");
+        });
+
+        socket.on('disconnect', function() {
+          clients = {};
+          setEditorContent("Disconnected from server. Try another one.");
+        })
+
+        $('#editor').bind('input propertychange', function() {
+          if (!connected) {
+            return;
+          }
+
+          // Get diff
+          var contents = getEditorContent();
+          var dmp = new diff_match_patch();
+          dmp.Diff_Timeout = 0;
+          dmp.Diff_EditCost = 4;
+          var d = dmp.diff_main(shadowCopy, contents);
+
+          // Send diff
+          var ops = [];
+          var cursor = 0;
+          for (var i = 0; i < d.length; i++) {
+            var kind = d[i][0];
+            var value = d[i][1];
+            var op;
+            switch (kind) {
+              case -1:
+                op = -value.length;
+                // socket.emit('edit delete', cursor, value.length);
+                break;
+              case 1:
+                op = value;
+                // socket.emit('edit insert', cursor, value);
+                break;
+              case 0:
+                op = value.length;
+                // cursor += value.length
+                break;
+            }
+            ops.push(op);
+          }
+
+          var operation = {
+            "Ops": ops,
+            "Meta": {
+              "Authors": [user],
+            }
+          }
+          socket.emit('edit', JSON.stringify(operation), function(success, err) {
+            if (!success) {
+              console.log(err);
+            }
+          });
+
+          // Save shadow
+          shadowCopy = contents;
+        });
+
+        $("#editor").bind("mousedown mouseup keydown keyup", function() {
+          if (cursorChanged()) {
+            var cursorPosition = getCursorPosition();
+            var userData = {
+              "Name": user,
+              "DocID": docID,
+              "CursorPos": cursorPosition,
+            }
+            socket.emit('user update', JSON.stringify(userData));
+          }
+        });
+
+        socket.on('edit', function(operationJSON) {
+          var operation = JSON.parse(operationJSON);
+
+          if ($.inArray(user, operation.Meta.Authors) >= 0) {
+            return;
+          }
+
+          var ops = operation.Ops;
+          var shadowCopyNew = shadowCopy;
+          var cursor = 0;
+          var newCursorPos = lastCursorPosition;
+          for (var i = 0; i < ops.length; i++) {
+            var op = ops[i];
+            if (typeof op === "number") {
+              if (op < 0) {
+                shadowCopyNew = [shadowCopyNew.slice(0, cursor), shadowCopyNew.slice(cursor - op)].join('');
+                if (cursor < newCursorPos && newCursorPos <= cursor - op) {
+                  newCursorPos = cursor;
+                }
+              } else {
+                cursor += op;
+              }
+            } else if (typeof op === "string") {
+              shadowCopyNew = [shadowCopyNew.slice(0, cursor), op, shadowCopyNew.slice(cursor)].join('');
+              if (cursor < newCursorPos) {
+                newCursorPos += op.length;
+              }
+              cursor += op.length;
+            } else {
+              console.log("Error parsing op:", op);
+            }
+          }
+          shadowCopy = shadowCopyNew;
+          setEditorContent(shadowCopy);
+          if (newCursorPos != lastCursorPosition) {
+            lastCursorPosition = newCursorPos;
+            setCursorToPos($("#editor")[0], lastCursorPosition);
+            var userData = {
+              "Name": user,
+              "DocID": docID,
+              "CursorPos": lastCursorPosition,
+            }
+            socket.emit('user update', JSON.stringify(userData));
+          }
+        });
+
+        $('#doc-title').keydown(function (e){
+          if(e.keyCode == 13) {
+            docID = $('#doc-title').text();
+            var userData = {
+              "Name": user,
+              "DocID": docID,
+              "CursorPos": 0,
+            }
+            clients = {};
+            setEditorContent("");
+            socket.emit('user update', JSON.stringify(userData), function(success, err) {
+              if (success) {
+                connected = true;
+              } else {
+                connected = false;
+                if (!rejected) {
+                  setEditorContent(err);
+                }
+              }
+            });
+          }
+        })
+
+        socket.on('rejected', function(msg){
+          rejected = true;
+          setEditorContent(msg);
+        });
+
+        var caretColors = [
+          "#EE0000",
+          "#00EE00",
+          "#0000EE",
+          "#AAAA00",
+          "#AA00AA",
+          "#00AAAA",
+          "#999999",
+        ];
+        var curColor = 0;
+        socket.on('user update', function(clientJSON) {
+          var client = JSON.parse(clientJSON);
+          if (client.ID in clients) {
+            client.color = clients[client.ID].color;
+            clients[client.ID] = client
+          } else {
+            client.color = caretColors[curColor];
+            clients[client.ID] = client
+            curColor++;
+          }
+          refreshCarets();
+        });
+
+        socket.on('user remove', function(clientID) {
+          delete clients[clientID];
+          refreshCarets();
+        });
+      }).fail(function() {
+        setEditorContent("Unable to connect to manager server...");
+      });
+    </script>
+  </body>
+</html>
